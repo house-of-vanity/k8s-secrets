@@ -25,12 +25,6 @@ Edit `deployment.yaml` to specify which secrets to display:
 args:
   - "--secrets"
   - "secret1,secret2"
+  - "--namespace"
+  - "k8s-secrets"
 ```
-
-## Access
-
-```bash
-kubectl port-forward service/secret-reader 8080:80
-```
-
-Open http://localhost:8080
