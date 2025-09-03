@@ -1,6 +1,8 @@
 # Secret Reader
 
 Kubernetes secret viewer with TOTP support.
+
+
 <img height="250" alt="image" src="https://github.com/user-attachments/assets/a16b4d8e-b51b-4e2f-934a-8699bbdd90e3" />
 
 ## Features
