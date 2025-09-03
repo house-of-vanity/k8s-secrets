@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secrets</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+            margin: 20px;
+            background: #f5f5f5;
+            color: #333;
+        }
+        h1 {
+            font-size: 18px;
+            margin-bottom: 20px;
+        }
+        .secret {
+            background: white;
+            border: 1px solid #ddd;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 4px;
+        }
+        .secret-name {
+            font-weight: bold;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+        .data-item {
+            display: flex;
+            align-items: center;
+            margin: 8px 0;
+            padding: 8px;
+            background: #f9f9f9;
+            border-radius: 3px;
+        }
+        .data-key {
+            display: inline-block;
+            min-width: 150px;
+            font-weight: bold;
+            flex-shrink: 0;
+        }
+        .data-value-wrapper {
+            flex-grow: 1;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .data-value {
+            font-family: 'Courier New', monospace;
+            background: #fff;
+            padding: 6px 10px;
+            border: 1px solid #e0e0e0;
+            border-radius: 3px;
+            word-break: break-all;
+            flex-grow: 1;
+        }
+        .copy-btn {
+            background: #f0f0f0;
+            border: 1px solid #ccc;
+            border-radius: 3px;
+            padding: 6px 10px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+            flex-shrink: 0;
+        }
+        .copy-btn:hover {
+            background: #e0e0e0;
+        }
+        .copy-btn.copied {
+            background: #4caf50;
+            color: white;
+            border-color: #4caf50;
+        }
+        .totp-code {
+            font-size: 24px;
+            font-weight: bold;
+            font-family: 'Courier New', monospace;
+            letter-spacing: 3px;
+            color: #007bff;
+            padding: 8px 12px;
+            background: #e8f4ff;
+            border: 1px solid #007bff;
+            border-radius: 4px;
+        }
+        .totp-timer {
+            font-size: 12px;
+            color: #666;
+            margin-left: 10px;
+        }
+        .error {
+            background: #ffdddd;
+            color: #cc0000;
+            padding: 10px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Secrets</h1>
+    
+    {% if let Some(err) = error %}
+    <div class="error">
+        Error: {{ err }}
+    </div>
+    {% else %}
+    {% for secret in secrets %}
+    <div class="secret">
+        <div class="secret-name">{{ secret.name }}</div>
+        {% for (key, value) in secret.data %}
+        <div class="data-item">
+            <span class="data-key">{{ key }}:</span>
+            <div class="data-value-wrapper">
+                {% if value.starts_with("otpauth://totp/") %}
+                <span class="totp-code" id="totp-{{ secret.name }}-{{ key }}">------</span>
+                <span class="totp-timer" id="timer-{{ secret.name }}-{{ key }}"></span>
+                <button class="copy-btn" onclick="copyTotp('{{ secret.name }}-{{ key }}')">📋</button>
+                {% else %}
+                <code class="data-value" id="value-{{ secret.name }}-{{ key }}">{{ value }}</code>
+                <button class="copy-btn" onclick="copyValue('{{ secret.name }}-{{ key }}', '{{ value|escape }}')">📋</button>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    <script src="https://unpkg.com/otpauth@9/dist/otpauth.umd.min.js"></script>
+    <script>
+        const otpUrls = [];
+        const totpValues = {};
+        
+        {% for secret in secrets %}
+        {% for (key, value) in secret.data %}
+        {% if value.starts_with("otpauth://totp/") %}
+        otpUrls.push({
+            id: 'totp-{{ secret.name }}-{{ key }}',
+            timerId: 'timer-{{ secret.name }}-{{ key }}',
+            url: {{ value|json|safe }},
+            key: '{{ secret.name }}-{{ key }}'
+        });
+        {% endif %}
+        {% endfor %}
+        {% endfor %}
+        
+        function updateTOTP() {
+            const now = Date.now();
+            const timeRemaining = 30 - (Math.floor(now / 1000) % 30);
+            
+            otpUrls.forEach(item => {
+                try {
+                    const totp = OTPAuth.URI.parse(item.url);
+                    const token = totp.generate();
+                    totpValues[item.key] = token.toString().padStart(6, '0');
+                    const formatted = totpValues[item.key].match(/.{1,3}/g).join(' ');
+                    document.getElementById(item.id).textContent = formatted;
+                    document.getElementById(item.timerId).textContent = timeRemaining + 's';
+                } catch (e) {
+                    document.getElementById(item.id).textContent = 'ERROR';
+                    console.error('Failed to generate TOTP:', e);
+                }
+            });
+        }
+        
+        function copyValue(id, value) {
+            const decodedValue = value.replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+            navigator.clipboard.writeText(decodedValue).then(() => {
+                const btn = event.target;
+                btn.classList.add('copied');
+                btn.textContent = '✓';
+                setTimeout(() => {
+                    btn.classList.remove('copied');
+                    btn.textContent = '📋';
+                }, 2000);
+            });
+        }
+        
+        function copyTotp(key) {
+            const code = totpValues[key];
+            if (code) {
+                navigator.clipboard.writeText(code).then(() => {
+                    const btn = event.target;
+                    btn.classList.add('copied');
+                    btn.textContent = '✓';
+                    setTimeout(() => {
+                        btn.classList.remove('copied');
+                        btn.textContent = '📋';
+                    }, 2000);
+                });
+            }
+        }
+        
+        if (otpUrls.length > 0) {
+            updateTOTP();
+            setInterval(updateTOTP, 1000);
+        }
+    </script>
+</body>
+</html>
