@@ -15,6 +15,4 @@ clap = { version = "4.5", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 anyhow = "1.0"
-totp-lite = "2.0"
-url = "2.5"
-base32 = "0.5"
+totp-rs = { version = "5.6", features = ["otpauth"] }

@@ -12,11 +12,9 @@ use k8s_openapi::api::core::v1::Secret;
 use kube::{Api, Client};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-use totp_lite::{totp, Sha1};
+use totp_rs::TOTP;
 use tracing::{error, info};
 use tracing_subscriber;
-use url::Url;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -135,33 +133,23 @@ async fn health_handler() -> impl IntoResponse {
 }
 
 fn generate_totp_code(otpauth_url: &str) -> Option<String> {
-    let url = Url::parse(otpauth_url).ok()?;
-    
-    if url.scheme() != "otpauth" || url.host_str() != Some("totp") {
-        return None;
-    }
-    
-    let mut secret = None;
-    let mut period = 30u64;
-    
-    for (key, value) in url.query_pairs() {
-        match key.as_ref() {
-            "secret" => secret = Some(value.to_string()),
-            "period" => period = value.parse().unwrap_or(30),
-            _ => {}
+    // Try to parse the otpauth URL directly using totp-rs
+    match TOTP::from_url(otpauth_url) {
+        Ok(totp) => {
+            // Generate the current TOTP code
+            match totp.generate_current() {
+                Ok(code) => Some(code),
+                Err(e) => {
+                    error!("Failed to generate TOTP code: {}", e);
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            error!("Failed to parse TOTP URL: {}", e);
+            None
         }
     }
-    
-    let secret = secret?;
-    let decoded = base32::decode(base32::Alphabet::Rfc4648 { padding: false }, &secret)?;
-    
-    let time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_secs() / period;
-    
-    let code = totp::<Sha1>(&decoded, time);
-    Some(code)
 }
 
 async fn secret_handler(
