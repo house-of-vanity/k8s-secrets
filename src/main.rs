@@ -1,16 +1,16 @@
 use anyhow::Result;
 use askama::Template;
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
-    response::{Html, IntoResponse},
+    response::{Html, IntoResponse, Response},
     routing::get,
     Router,
 };
 use clap::Parser;
 use k8s_openapi::api::core::v1::Secret;
 use kube::{Api, Client};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{error, info};
 use tracing_subscriber;
@@ -46,6 +46,12 @@ struct SecretData {
 struct IndexTemplate {
     secrets: Vec<SecretData>,
     error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SecretQuery {
+    name: String,
+    field: String,
 }
 
 async fn read_secrets(state: &AppState) -> Result<Vec<SecretData>> {
@@ -125,6 +131,38 @@ async fn health_handler() -> impl IntoResponse {
     "OK"
 }
 
+async fn secret_handler(
+    Query(params): Query<SecretQuery>,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    info!("Fetching secret: {} field: {}", params.name, params.field);
+    
+    let secrets_api: Api<Secret> = Api::namespaced(state.client.clone(), &state.namespace);
+    
+    match secrets_api.get(&params.name).await {
+        Ok(secret) => {
+            if let Some(data) = secret.data {
+                if let Some(value) = data.get(&params.field) {
+                    let decoded = String::from_utf8_lossy(&value.0).to_string();
+                    return decoded.into_response();
+                }
+            }
+            
+            if let Some(string_data) = secret.string_data {
+                if let Some(value) = string_data.get(&params.field) {
+                    return value.clone().into_response();
+                }
+            }
+            
+            (StatusCode::NOT_FOUND, format!("Field '{}' not found in secret '{}'", params.field, params.name)).into_response()
+        }
+        Err(e) => {
+            error!("Failed to read secret {}: {}", params.name, e);
+            (StatusCode::NOT_FOUND, format!("Secret '{}' not found: {}", params.name, e)).into_response()
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -151,6 +189,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/", get(index_handler))
         .route("/health", get(health_handler))
+        .route("/secret", get(secret_handler))
         .with_state(state);
     
     let addr = format!("0.0.0.0:{}", args.port);
