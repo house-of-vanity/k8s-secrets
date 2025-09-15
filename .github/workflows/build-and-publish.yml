@@ -1,0 +1,213 @@
+name: Build and Publish
+
+on:
+  push:
+    branches:
+      - master
+      - main
+    tags:
+      - 'v*.*.*'
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: secret-reader
+
+jobs:
+  build:
+    name: Build binary
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - build_target: x86_64-unknown-linux-gnu
+            platform_name: linux-amd64
+          - build_target: aarch64-unknown-linux-gnu
+            platform_name: linux-arm64
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+      
+      - name: Cache Cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-index-
+      
+      - name: Cache Cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-${{ matrix.build_target }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.build_target }}-cargo-build-
+
+      - uses: dtolnay/rust-toolchain@stable
+      
+      - name: Install rust targets
+        run: rustup target add ${{ matrix.build_target }}
+        
+      - name: Install Linux x86_64 dependencies
+        if: matrix.build_target == 'x86_64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+          
+      - name: Install Linux ARM64 cross-compilation dependencies
+        if: matrix.build_target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu pkg-config libssl-dev build-essential
+          
+      - name: Build Linux x86_64
+        if: matrix.build_target == 'x86_64-unknown-linux-gnu'
+        run: cargo build --target ${{ matrix.build_target }} --release
+        
+      - name: Build Linux ARM64
+        if: matrix.build_target == 'aarch64-unknown-linux-gnu'
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+        run: cargo build --target ${{ matrix.build_target }} --release
+          
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY_NAME }}_${{ matrix.platform_name }}
+          path: target/${{ matrix.build_target }}/release/${{ env.BINARY_NAME }}
+
+  prepare_docker_matrix:
+    name: Prepare Docker Matrix
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      platforms: ${{ steps.set-matrix.outputs.platforms }}
+      platform-list: ${{ steps.set-matrix.outputs.platform-list }}
+    steps:
+      - name: Set matrix based on available artifacts
+        id: set-matrix
+        run: |
+          # Get list of built platforms from build job matrix
+          BUILT_PLATFORMS=""
+          if [[ "${{ contains(needs.build.result, 'success') }}" == "true" ]]; then
+            # Check which platforms were actually built
+            # Include both amd64 and arm64
+            BUILT_PLATFORMS="linux/amd64,linux/arm64"
+          fi
+          
+          if [[ -n "$BUILT_PLATFORMS" ]]; then
+            echo "platforms=${BUILT_PLATFORMS}" >> $GITHUB_OUTPUT
+            echo "platform-list=[\"linux/amd64\",\"linux/arm64\"]" >> $GITHUB_OUTPUT
+          else
+            echo "No platforms built successfully"
+            exit 1
+          fi
+
+  build_docker:
+    name: Build and Publish Docker Image
+    needs: [build, prepare_docker_matrix]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: ${{ fromJson(needs.prepare_docker_matrix.outputs.platform-list) }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set platform variables
+        id: platform
+        run: |
+          platform=${{ matrix.platform }}
+          if [[ "$platform" == "linux/arm64" ]]; then
+            echo "arch=arm64" >> $GITHUB_OUTPUT
+            echo "arch_name=arm64" >> $GITHUB_OUTPUT
+          else
+            echo "arch=amd64" >> $GITHUB_OUTPUT
+            echo "arch_name=amd64" >> $GITHUB_OUTPUT
+          fi
+          
+      - name: Download artifact for platform
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.BINARY_NAME }}_linux-${{ steps.platform.outputs.arch }}
+          path: bin/linux_${{ steps.platform.outputs.arch }}/
+        continue-on-error: true
+          
+      - name: Prepare binary
+        run: |
+          if [[ -f "bin/linux_${{ steps.platform.outputs.arch }}/${{ env.BINARY_NAME }}" ]]; then
+            chmod +x bin/linux_${{ steps.platform.outputs.arch }}/${{ env.BINARY_NAME }}
+            ls -la bin/*/
+          else
+            echo "Binary not found for ${{ matrix.platform }}"
+            exit 1
+          fi
+          
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Login to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          
+      - name: Set outputs
+        id: vars
+        run: |
+          echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          
+          # Extract version from Cargo.toml
+          VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          echo "cargo_version=${VERSION}" >> $GITHUB_OUTPUT
+          
+          # Determine Docker tags based on the event
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            # Tag push - use tag name, version from Cargo.toml and latest
+            TAG_NAME=${GITHUB_REF#refs/tags/}
+            echo "docker_tags=${{ secrets.DOCKERHUB_USERNAME }}/k8s-secrets:${TAG_NAME},${{ secrets.DOCKERHUB_USERNAME }}/k8s-secrets:${VERSION},${{ secrets.DOCKERHUB_USERNAME }}/k8s-secrets:latest" >> $GITHUB_OUTPUT
+            echo "push=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == refs/heads/* ]]; then
+            # Branch push - use branch name, version from Cargo.toml and short SHA
+            BRANCH=${GITHUB_REF#refs/heads/}
+            echo "docker_tags=${{ secrets.DOCKERHUB_USERNAME }}/k8s-secrets:${BRANCH},${{ secrets.DOCKERHUB_USERNAME }}/k8s-secrets:${VERSION},${{ secrets.DOCKERHUB_USERNAME }}/k8s-secrets:$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+            echo "push=true" >> $GITHUB_OUTPUT
+          else
+            # Other event
+            echo "docker_tags=${{ secrets.DOCKERHUB_USERNAME }}/k8s-secrets:$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+            echo "push=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Check outputs
+        run: |
+          echo "Platform: ${{ matrix.platform }}"
+          echo "Architecture: ${{ steps.platform.outputs.arch }}"
+          echo "Short SHA: ${{ steps.vars.outputs.sha_short }}"
+          echo "Docker Tags: ${{ steps.vars.outputs.docker_tags }}"
+          echo "Push: ${{ steps.vars.outputs.push }}"
+        
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.prebuilt
+          platforms: ${{ matrix.platform }}
+          push: ${{ steps.vars.outputs.push == 'true' }}
+          tags: ${{ steps.vars.outputs.docker_tags }}
+          build-args: |
+            TARGETARCH=${{ steps.platform.outputs.arch }}
+          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/k8s-secrets:buildcache-${{ steps.platform.outputs.arch }}
+          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/k8s-secrets:buildcache-${{ steps.platform.outputs.arch }},mode=max

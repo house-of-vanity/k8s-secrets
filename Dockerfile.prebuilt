@@ -1,0 +1,9 @@
+FROM gcr.io/distroless/cc-debian12
+
+ARG TARGETARCH
+
+COPY bin/linux_${TARGETARCH}/secret-reader /app/secret-reader
+
+EXPOSE 3000
+
+ENTRYPOINT ["/app/secret-reader"]
