@@ -12,8 +12,11 @@ use k8s_openapi::api::core::v1::Secret;
 use kube::{Api, Client};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use totp_lite::{totp, Sha1};
 use tracing::{error, info};
 use tracing_subscriber;
+use url::Url;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -131,6 +134,36 @@ async fn health_handler() -> impl IntoResponse {
     "OK"
 }
 
+fn generate_totp_code(otpauth_url: &str) -> Option<String> {
+    let url = Url::parse(otpauth_url).ok()?;
+    
+    if url.scheme() != "otpauth" || url.host_str() != Some("totp") {
+        return None;
+    }
+    
+    let mut secret = None;
+    let mut period = 30u64;
+    
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "secret" => secret = Some(value.to_string()),
+            "period" => period = value.parse().unwrap_or(30),
+            _ => {}
+        }
+    }
+    
+    let secret = secret?;
+    let decoded = base32::decode(base32::Alphabet::Rfc4648 { padding: false }, &secret)?;
+    
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_secs() / period;
+    
+    let code = totp::<Sha1>(&decoded, time);
+    Some(code)
+}
+
 async fn secret_handler(
     Query(params): Query<SecretQuery>,
     State(state): State<Arc<AppState>>,
@@ -144,12 +177,27 @@ async fn secret_handler(
             if let Some(data) = secret.data {
                 if let Some(value) = data.get(&params.field) {
                     let decoded = String::from_utf8_lossy(&value.0).to_string();
+                    
+                    // Check if it's a TOTP URL and generate code
+                    if decoded.starts_with("otpauth://totp/") {
+                        if let Some(code) = generate_totp_code(&decoded) {
+                            return code.into_response();
+                        }
+                    }
+                    
                     return decoded.into_response();
                 }
             }
             
             if let Some(string_data) = secret.string_data {
                 if let Some(value) = string_data.get(&params.field) {
+                    // Check if it's a TOTP URL and generate code
+                    if value.starts_with("otpauth://totp/") {
+                        if let Some(code) = generate_totp_code(value) {
+                            return code.into_response();
+                        }
+                    }
+                    
                     return value.clone().into_response();
                 }
             }
