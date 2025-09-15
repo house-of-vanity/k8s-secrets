@@ -20,6 +20,10 @@ kubectl apply -f deployment.yaml
 kubectl apply -f service.yaml
 ```
 
+## Security
+
+⚠️ **The service has no built-in authentication**. Use a proxy for auth (nginx, oauth2-proxy, etc).
+
 ## Configuration
 
 Edit `deployment.yaml` to specify which secrets to display:
@@ -30,4 +34,11 @@ args:
   - "secret1,secret2"
   - "--namespace"
   - "k8s-secrets"
+```
+
+## API Usage
+
+```bash
+# Get secret field as plaintext
+curl "http://localhost:3000/secret?name=my-secret&field=password"
 ```
