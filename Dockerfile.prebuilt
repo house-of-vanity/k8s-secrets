@@ -1,9 +1,18 @@
-FROM gcr.io/distroless/cc-debian12
+FROM debian:bookworm-slim
 
 ARG TARGETARCH
 
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY bin/linux_${TARGETARCH}/secret-reader /app/secret-reader
 
+RUN chmod +x /app/secret-reader
+
 EXPOSE 3000
+
+USER 1000
 
 ENTRYPOINT ["/app/secret-reader"]
