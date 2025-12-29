@@ -10,6 +10,7 @@ Kubernetes secret viewer with TOTP support.
 - View Kubernetes secrets in web UI
 - Auto-generate TOTP codes from otpauth:// URLs
 - Copy values with one click
+- Show secrets sent via /webhook endpoint in json like `{"name":"Login Code","fields":{"Code":"12345678","another field":"some content"}}`
 
 ## Deploy
 
