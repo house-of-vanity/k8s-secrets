@@ -1,17 +1,19 @@
 use anyhow::Result;
 use askama::Template;
 use axum::{
-    extract::{Query, State},
+    extract::{Json, Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Router,
 };
+use chrono;
 use clap::Parser;
 use k8s_openapi::api::core::v1::Secret;
 use kube::{Api, Client};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use totp_rs::TOTP;
 use tracing::{error, info};
 use tracing_subscriber;
@@ -27,6 +29,9 @@ struct Args {
 
     #[arg(short, long, default_value = "default")]
     namespace: String,
+
+    #[arg(short = 'w', long, help = "Enable webhook endpoint at /webhook")]
+    webhook: bool,
 }
 
 #[derive(Clone)]
@@ -34,12 +39,24 @@ struct AppState {
     client: Client,
     secret_names: Vec<String>,
     namespace: String,
+    webhook_secrets: Arc<RwLock<HashMap<String, WebhookSecret>>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct WebhookSecret {
+    name: String,
+    fields: HashMap<String, String>,
+    #[serde(skip_deserializing)]
+    #[serde(default)]
+    received_at: String,
 }
 
 #[derive(Serialize)]
 struct SecretData {
     name: String,
     data: Vec<(String, String)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    received_at: Option<String>,
 }
 
 #[derive(Template)]
@@ -80,6 +97,7 @@ async fn read_secrets(state: &AppState) -> Result<Vec<SecretData>> {
                 result.push(SecretData {
                     name: secret_name.clone(),
                     data: data_pairs,
+                    received_at: None,
                 });
             }
             Err(e) => {
@@ -87,6 +105,7 @@ async fn read_secrets(state: &AppState) -> Result<Vec<SecretData>> {
                 result.push(SecretData {
                     name: secret_name.clone(),
                     data: vec![("error".to_string(), format!("Failed to read: {}", e))],
+                    received_at: None,
                 });
             }
         }
@@ -98,21 +117,8 @@ async fn read_secrets(state: &AppState) -> Result<Vec<SecretData>> {
 async fn index_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     info!("Handling request, fetching secrets: {:?}", state.secret_names);
     
-    match read_secrets(&state).await {
-        Ok(secrets) => {
-            let template = IndexTemplate {
-                secrets,
-                error: None,
-            };
-            
-            match template.render() {
-                Ok(html) => Html(html).into_response(),
-                Err(e) => {
-                    error!("Template render error: {}", e);
-                    (StatusCode::INTERNAL_SERVER_ERROR, "Template render error").into_response()
-                }
-            }
-        }
+    let mut all_secrets = match read_secrets(&state).await {
+        Ok(secrets) => secrets,
         Err(e) => {
             error!("Failed to read secrets: {}", e);
             let template = IndexTemplate {
@@ -120,16 +126,66 @@ async fn index_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse 
                 error: Some(format!("Failed to read secrets: {}", e)),
             };
             
-            match template.render() {
+            return match template.render() {
                 Ok(html) => Html(html).into_response(),
                 Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read secrets").into_response(),
-            }
+            };
+        }
+    };
+    
+    // Add webhook secrets
+    if let Ok(webhook_secrets) = state.webhook_secrets.read() {
+        for (_, webhook_secret) in webhook_secrets.iter() {
+            let mut data_pairs: Vec<(String, String)> = webhook_secret.fields.iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            data_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+            
+            all_secrets.push(SecretData {
+                name: webhook_secret.name.clone(),
+                data: data_pairs,
+                received_at: Some(webhook_secret.received_at.clone()),
+            });
+        }
+    }
+    
+    let template = IndexTemplate {
+        secrets: all_secrets,
+        error: None,
+    };
+    
+    match template.render() {
+        Ok(html) => Html(html).into_response(),
+        Err(e) => {
+            error!("Template render error: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Template render error").into_response()
         }
     }
 }
 
 async fn health_handler() -> impl IntoResponse {
     "OK"
+}
+
+async fn webhook_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<WebhookSecret>,
+) -> impl IntoResponse {
+    info!("Received webhook for secret: {}", payload.name);
+    
+    let mut webhook_secret = payload;
+    webhook_secret.received_at = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string();
+    
+    match state.webhook_secrets.write() {
+        Ok(mut secrets) => {
+            secrets.insert(webhook_secret.name.clone(), webhook_secret);
+            (StatusCode::OK, "Webhook received")
+        }
+        Err(e) => {
+            error!("Failed to write webhook secret: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to store webhook")
+        }
+    }
 }
 
 fn generate_totp_code(otpauth_url: &str) -> Option<String> {
@@ -220,13 +276,20 @@ async fn main() -> Result<()> {
         client,
         secret_names: args.secrets,
         namespace: args.namespace,
+        webhook_secrets: Arc::new(RwLock::new(HashMap::new())),
     });
     
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/", get(index_handler))
         .route("/health", get(health_handler))
-        .route("/secret", get(secret_handler))
-        .with_state(state);
+        .route("/secret", get(secret_handler));
+    
+    if args.webhook {
+        info!("Webhook endpoint enabled at /webhook");
+        app = app.route("/webhook", post(webhook_handler));
+    }
+    
+    let app = app.with_state(state.clone());
     
     let addr = format!("0.0.0.0:{}", args.port);
     info!("Server listening on {}", addr);

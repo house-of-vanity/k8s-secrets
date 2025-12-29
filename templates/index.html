@@ -90,6 +90,12 @@
             color: #666;
             margin-left: 10px;
         }
+        .received-at {
+            font-size: 11px;
+            color: #888;
+            margin-top: 5px;
+            font-style: italic;
+        }
         .error {
             background: #ffdddd;
             color: #cc0000;
@@ -125,6 +131,9 @@
             </div>
         </div>
         {% endfor %}
+        {% if let Some(received) = secret.received_at %}
+        <div class="received-at">Received: {{ received }}</div>
+        {% endif %}
     </div>
     {% endfor %}
     {% endif %}
