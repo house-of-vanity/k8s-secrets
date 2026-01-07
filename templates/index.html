@@ -21,11 +21,49 @@
             padding: 15px;
             margin-bottom: 10px;
             border-radius: 4px;
+            position: relative;
+        }
+        .secret.expired {
+            border-color: #e74c3c;
+            background: #fdf2f2;
+        }
+        .secret-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
         }
         .secret-name {
             font-weight: bold;
-            margin-bottom: 10px;
             font-size: 16px;
+        }
+        .source-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 500;
+        }
+        .source-badge.k8s {
+            background: #326ce5;
+            color: white;
+        }
+        .source-badge.webhook {
+            background: #6c5ce7;
+            color: white;
+        }
+        .expired-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 500;
+            background: #e74c3c;
+            color: white;
         }
         .data-item {
             display: flex;
@@ -114,8 +152,21 @@
     </div>
     {% else %}
     {% for secret in secrets %}
-    <div class="secret">
-        <div class="secret-name">{{ secret.name }}</div>
+    <div class="secret{% if secret.expired %} expired{% endif %}">
+        <div class="secret-header">
+            <div class="secret-name">{{ secret.name }}</div>
+            {% match secret.source %}
+            {% when SecretSource::Kubernetes %}
+            <span class="source-badge k8s">☸ K8s</span>
+            {% when SecretSource::Webhook %}
+            <span class="source-badge webhook">⚡ Webhook</span>
+            {% endmatch %}
+            {% if secret.expired %}
+            {% if let Some(expires) = secret.expires_at %}
+            <span class="expired-badge">⚠ Expired at {{ expires }}</span>
+            {% endif %}
+            {% endif %}
+        </div>
         {% for (key, value) in secret.data %}
         <div class="data-item">
             <span class="data-key">{{ key }}:</span>
@@ -132,7 +183,7 @@
         </div>
         {% endfor %}
         {% if let Some(received) = secret.received_at %}
-        <div class="received-at">Received: {{ received }}</div>
+        <div class="received-at">Received: {{ received }}{% if let Some(expires) = secret.expires_at %}{% if !secret.expired %} · Expires: {{ expires }}{% endif %}{% endif %}</div>
         {% endif %}
     </div>
     {% endfor %}

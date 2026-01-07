@@ -46,17 +46,29 @@ struct AppState {
 struct WebhookSecret {
     name: String,
     fields: HashMap<String, String>,
+    #[serde(default)]
+    expires: Option<String>,
     #[serde(skip_deserializing)]
     #[serde(default)]
     received_at: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Serialize)]
+enum SecretSource {
+    Kubernetes,
+    Webhook,
 }
 
 #[derive(Serialize)]
 struct SecretData {
     name: String,
     data: Vec<(String, String)>,
+    source: SecretSource,
     #[serde(skip_serializing_if = "Option::is_none")]
     received_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at: Option<String>,
+    expired: bool,
 }
 
 #[derive(Template)]
@@ -70,6 +82,49 @@ struct IndexTemplate {
 struct SecretQuery {
     name: String,
     field: String,
+}
+
+fn parse_duration(s: &str) -> Option<chrono::Duration> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    
+    let (num_str, unit) = if s.ends_with('m') {
+        (&s[..s.len()-1], 'm')
+    } else if s.ends_with('h') {
+        (&s[..s.len()-1], 'h')
+    } else {
+        return None;
+    };
+    
+    let num: i64 = num_str.parse().ok()?;
+    match unit {
+        'm' => Some(chrono::Duration::minutes(num)),
+        'h' => Some(chrono::Duration::hours(num)),
+        _ => None,
+    }
+}
+
+fn calculate_expiry(received_at: &str, expires: &Option<String>) -> (Option<String>, bool) {
+    let duration = match expires {
+        Some(exp) => match parse_duration(exp) {
+            Some(d) => d,
+            None => return (None, false),
+        },
+        None => return (None, false),
+    };
+    
+    let received = match chrono::NaiveDateTime::parse_from_str(received_at, "%Y-%m-%d %H:%M:%S UTC") {
+        Ok(dt) => dt,
+        Err(_) => return (None, false),
+    };
+    
+    let expires_at = received + duration;
+    let now = chrono::Utc::now().naive_utc();
+    let expired = now > expires_at;
+    
+    (Some(expires_at.format("%Y-%m-%d %H:%M:%S UTC").to_string()), expired)
 }
 
 async fn read_secrets(state: &AppState) -> Result<Vec<SecretData>> {
@@ -97,7 +152,10 @@ async fn read_secrets(state: &AppState) -> Result<Vec<SecretData>> {
                 result.push(SecretData {
                     name: secret_name.clone(),
                     data: data_pairs,
+                    source: SecretSource::Kubernetes,
                     received_at: None,
+                    expires_at: None,
+                    expired: false,
                 });
             }
             Err(e) => {
@@ -105,7 +163,10 @@ async fn read_secrets(state: &AppState) -> Result<Vec<SecretData>> {
                 result.push(SecretData {
                     name: secret_name.clone(),
                     data: vec![("error".to_string(), format!("Failed to read: {}", e))],
+                    source: SecretSource::Kubernetes,
                     received_at: None,
+                    expires_at: None,
+                    expired: false,
                 });
             }
         }
@@ -141,10 +202,15 @@ async fn index_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse 
                 .collect();
             data_pairs.sort_by(|a, b| a.0.cmp(&b.0));
             
+            let (expires_at, expired) = calculate_expiry(&webhook_secret.received_at, &webhook_secret.expires);
+            
             all_secrets.push(SecretData {
                 name: webhook_secret.name.clone(),
                 data: data_pairs,
+                source: SecretSource::Webhook,
                 received_at: Some(webhook_secret.received_at.clone()),
+                expires_at,
+                expired,
             });
         }
     }
